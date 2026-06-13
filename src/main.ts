@@ -9,7 +9,7 @@ import { action, observable, reaction } from "mobx";
 
 type Subscription = {
   name: string;
-  subscriptionId: string;
+  id: string;
 }
 
 type MasterAuth = {
@@ -18,7 +18,7 @@ type MasterAuth = {
 
 type Cluster = {
   name: string;
-  zone: string;
+  resourceGroup: string;
   endpoint: string;
   selfLink: string;
   masterAuth: MasterAuth;
@@ -64,7 +64,7 @@ export default class AksMain extends Main.LensExtension {
     try {
       const subscriptions = await this.getSubscriptions();
       for (const subscription of subscriptions) {
-        const clusters = await this.getClusters(subscription.subscriptionId);
+        const clusters = await this.getClusters(subscription.id);
         if (clusters.length > 0) {
           for (const cluster of clusters) {
             updatedClusters.push(await this.ensureCluster(subscription, cluster));
@@ -92,7 +92,7 @@ export default class AksMain extends Main.LensExtension {
 
     const kubeConfigPath = path.join(await this.getExtensionFileFolder(), aksCluster.endpoint);
     fs.closeSync(fs.openSync(kubeConfigPath, "w"));
-    await this.azcli(["aks", "get-credentials", aksCluster.name, "--zone", aksCluster.zone, "--subscription", subscription.subscriptionId], {
+    await this.azcli(["aks", "get-credentials", "-n", aksCluster.name, "-g", aksCluster.resourceGroup, "--subscription", subscription.id, "--overwrite-existing", "--format", "exec"], {
       ...process.env,
       "KUBECONFIG": kubeConfigPath
     })
@@ -105,9 +105,9 @@ export default class AksMain extends Main.LensExtension {
         name: aksCluster.name,
         source: "aks-sync",
         labels: {
-          "zone": aksCluster.zone,
+          "resourceGroup": aksCluster.resourceGroup,
           "subscriptionName": subscription.name,
-          "subscriptionId": subscription.subscriptionId
+          "subscriptionId": subscription.id
         }
       },
       spec: {
@@ -121,25 +121,29 @@ export default class AksMain extends Main.LensExtension {
   }
 
   private async getSubscriptions() {
-    const subscriptions = await this.azcli<Subscription>(["subscriptions", "list"]);
+    const subscriptions = await this.azcli<Subscription>(["account", "list", "--query", "[].{id:id, name:name}"]);
 
     return subscriptions;
   }
 
   private async getClusters(subscriptionId: string) {
-    return this.azcli<Cluster>(["container", "clusters", "list", "--subscription", subscriptionId]);
+    return this.azcli<Cluster>(["aks", "list", "--subscription", subscriptionId]); //, "--query", "[].{resourceGroup:resourceGroup, name:name}"]);
   }
 
   private async azcli<T>(args: string[], env?: NodeJS.ProcessEnv): Promise<T[]> {
-    const azcliBin = PreferencesStore.getInstance().azcliPath || "azcli";
+    const azcliBin = PreferencesStore.getInstance().azcliPath || "az";
     return new Promise((resolve, reject) => {
-      exec(`${azcliBin} ${args.join(" ")} --format json`, {
+      exec(`${azcliBin} ${args.join(" ")}`, {
         env: env ?? process.env
       }, (error, stdout) => {
         if (error) {
           return reject(error);
         }
-        return resolve(JSON.parse(stdout));
+        try {
+          return resolve(JSON.parse(stdout));
+        } catch {
+          return resolve(yaml.load(stdout));
+        }
       })
     });
   }
